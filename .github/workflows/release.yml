@@ -1,0 +1,70 @@
+name: Build and release
+
+# Every push to main builds the mod zip and attaches it to the release for the version in
+# info.json (tag v<version>). To publish a new version, change "version" in info.json and
+# add a "## <version>" section to changelog.md, then push.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the mod zip
+        id: build
+        run: |
+          NAME=$(jq -r .name info.json)
+          VERSION=$(jq -r .version info.json)
+          DIR="${NAME}_${VERSION}"
+          mkdir -p "build/${DIR}"
+          # Everything the game needs; repository files such as the README and workflow are left out.
+          tar -cf - \
+            --exclude='./.git' --exclude='./.github' --exclude='./.gitignore' --exclude='./build' \
+            --exclude='*.zip' --exclude='./README.md' --exclude='./LICENSE' \
+            --exclude='./changelog.md' --exclude='./description.md' \
+            . | tar -xf - -C "build/${DIR}"
+          (cd build && zip -qr "../${DIR}.zip" "${DIR}")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "zip=${DIR}.zip" >> "$GITHUB_OUTPUT"
+          unzip -l "${DIR}.zip"
+
+      - name: Release notes from the changelog
+        run: |
+          awk -v v="${{ steps.build.outputs.version }}" '
+            $0 ~ "^## " v " " { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' changelog.md > notes.md
+          if [ ! -s notes.md ]; then echo "Planet Power Link ${{ steps.build.outputs.version }}" > notes.md; fi
+          cat notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.build.outputs.version }}"
+          ZIP="${{ steps.build.outputs.zip }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Same version pushed again: replace the zip and the notes.
+            gh release upload "$TAG" "$ZIP" --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" "$ZIP" \
+              --title "Planet Power Link ${{ steps.build.outputs.version }}" \
+              --notes-file notes.md \
+              --target "$GITHUB_SHA"
+          fi
+
+      - name: Keep the zip as a workflow artifact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.zip }}
+          path: ${{ steps.build.outputs.zip }}
